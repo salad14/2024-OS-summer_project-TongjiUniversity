@@ -52,3 +52,33 @@ warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 ```bash
 $ git clone git://github.com/mit-pdos/xv6-riscv.git
 ```
+
+# Guidance
+
+## 调试提示
+
+1.理解 C 和指针：建议阅读《C 程序设计语言》（第二版）并做指针练习。如果不熟悉 C 的指针，会在实验中遇到很大困难。特别注意几个常见的指针习惯用法，比如 int *p = (int*)100 和 p[i] 等。
+
+2.Git 使用：代码部分运行正常时，请用 Git 提交，以便出错时能回滚到之前的状态。
+
+3.通过插入打印语句理解代码行为。如果输出太多，使用 script 命令记录输出并进行搜索。
+
+4.使用 GDB 调试 xv6：在一个窗口运行 make qemu-gdb，在另一个窗口运行 gdb，设置断点并继续执行。当程序崩溃时，可以用 bt 获取回溯信息。如果内核崩溃或挂起，使用 GDB 查找问题所在。
+
+5.QEMU 监控器：按 Ctrl-A C 进入 QEMU 控制台，使用 info mem 查询页面表。可用 cpu 命令选择核，或用 make CPUS=1 qemu 只启动一个核。
+
+# Lab: Xv6 and Unix utilities
+
+本实验将使您熟悉 xv6 及其系统调用。
+
+## Boot xv6
+
+1.获取实验室的 xv6 源代码并签出 util 分支：
+
+```bash
+$ git clone git://g.csail.mit.edu/xv6-labs-2021
+Cloning into 'xv6-labs-2021'...
+...
+$ cd xv6-labs-2021
+$ git checkout util
+```
