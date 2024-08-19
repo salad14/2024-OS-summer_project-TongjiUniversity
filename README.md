@@ -82,3 +82,224 @@ Cloning into 'xv6-labs-2021'...
 $ cd xv6-labs-2021
 $ git checkout util
 ```
+# png1
+
+xv6-labs-2021 仓库与本书的仓库略有不同 XV6-RISCV;它主要添加一些文件。如果你好奇，可以通过下列命令查看git日志：
+```bash
+$ git log
+```
+
+Git 允许您跟踪对代码所做的更改。 例如，如果您完成了其中一项练习，并且想要检查您的进度，您可以提交更改通过运行：
+```bash
+$ git commit -am 'my solution for util lab exercise 1'
+Created commit 60d2135: my solution for util lab exercise 1
+ 1 files changed, 1 insertions(+), 0 deletions(-)
+```
+
+2.构建并运行xv6
+
+```bash
+$ make qemu
+riscv64-linux-gnu-gcc    -c -o kernel/entry.o kernel/entry.S
+······
+qemu-system-riscv64 -machine virt -bios none -kernel kernel/kernel -m 128M -smp 3 -nographic -drive file=fs.img,if=none,format=raw,id=x0 -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
+
+xv6 kernel is booting
+
+hart 1 starting
+hart 2 starting
+init: starting sh
+$
+```
+
+如果在提示符下键入 ls，则应看到类似的输出 到以下内容：
+```bash
+$ ls
+.              1 1 1024
+..             1 1 1024
+README         2 2 2226
+xargstest.sh   2 3 93
+cat            2 4 23656
+echo           2 5 22488
+forktest       2 6 13232
+grep           2 7 26808
+init           2 8 23312
+kill           2 9 22424
+ln             2 10 22272
+ls             2 11 25824
+mkdir          2 12 22544
+rm             2 13 22528
+sh             2 14 40552
+stressfs       2 15 23520
+usertests      2 16 150240
+grind          2 17 37032
+wc             2 18 24624
+zombie         2 19 21800
+console        3 20 0
+```
+这些是 mkfs 包含在 初始文件系统;大多数是您可以运行的程序。我们刚刚运行了其中一个：ls。
+
+xv6没有ps命令，但是如果输入`Ctrl-p`，内核会打印每个进程的信息。如果你现在尝试一下，你会看到两行：一行是init，一行是sh。
+
+要退出 qemu，请键入：`Ctrl-a x`.
+
+# Sleep
+
+### 实验目的
+1.为xv6实现UNIX程序sleep。
+2.实现的sleep应当按用户指定的ticks数暂停，其中tick是xv6内核定义的时间概念，即定时器芯片两次中断之间的时间。解决方案应该在文件user/sleep.c中。
+
+### 实验步骤
+1.在开始编码之前，请阅读 [xv6 book](https://pdos.csail.mit.edu/6.828/2021/xv6/book-riscv-rev2.pdf)的第1章，并查看`user/`中的其他程序（例如`user/echo.c`、`user/grep.c`和`user/rm.c`），了解如何获取传递命令行参数给程序。
+
+2.在命令行中，您可以运行以下命令来打开文件并查看其内容：$ vim user/echo.c 可以使用任何文本编辑器打开文件，例如 Vim、Nano、Gedit 等。以Vim为例，在 Vim 编辑器中打开文件后，要退出并返回终端命令行界面，可以按照以下步骤操作：
+```bash
+1. 如果您处于编辑模式（Insert Mode），请按下 Esc 键，以确保切换到正常模式（Normal Mode）。
+
+2. 在正常模式下，按 : 进入命令模式：
+    保存文件并退出：wq 或 :x
+    只保存文件：:w
+    退出且不保存：:q!
+
+3.使用 `cat` 命令来显示文件的内容。例如，运行以下命令来查看文件内容：`cat user/echo.c`
+   `cat` 命令会将文件的内容直接输出到终端。
+
+4.使用 less 命令：`less` 命令是一个分页查看器，用于逐页查看文件内容（使用空格键向下翻页，使用 b 键向上翻页，按下 q 键退出）。          例如，  运行以下命令来查看文件内容：`less user/echo.c`
+
+5.总结：
+  进入插入模式：i、a、o
+  
+  退出插入模式：Esc
+  
+  保存并退出：:wq
+  
+  不保存退出：:q!
+  
+  删除一行：dd
+  
+  复制一行：yy
+  
+  粘贴：p
+  
+  查找：/keyword
+  
+  撤销：u
+```
+
+3.   通过 `kernel/sysproc.c` 中的 `sys_sleep` 获取实现`sleep`系统调用的xv6内核代码；通过 `user/user.h`获取可从用户程序调用`sleep`的C语言定义；通过 `user/usys.S`获取从用户代码跳转到内核以实现`sleep`的汇编代码。
+
+4.在程序中使用系统调用`sleep`，其中命令行参数以字符串形式传递，可以使用`atoi`（参见`user/ulib.c`）将其转换为整数。最后，需要确保`main`调用`exit()`以退出程序。此外如果用户忘记传递参数，sleep应打印错误信息。
+
+   使用vim编辑器修改sleep程序：
+
+   ```c
+   int main(int argc, char *argv[])
+   {
+     if (argc < 2)
+     {
+       fprintf(2, "need a param");
+       exit(1);
+     }
+     int time = atoi(argv[1]);
+     sleep(time);
+     exit(0);
+   }
+   ```
+
+5.将编写好的睡眠程序添加到 Makefile 的 UPROGS 中;让 QEMU 编译你的程序，能够从 xv6 shell 运行它。
+
+添加`sleep`目标程序：输入命令行`$ vim Makefile`打开`Makefile`文件，在 `Makefile` 中找到名为 `UPROGS` 的行，这是一个定义用户程序的变量。在 `UPROGS` 行中，添加 `sleep` 程序的目标名称：`$U/_sleep\`。
+
+编译运行程序：在终端中，运行 `make qemu` 命令编译 xv6 并启动虚拟机，随后通过测试程序来检测sleep程序的正确性。
+
+从xv6 shell运行程序：
+```bash
+ $ make qemu
+...
+init: starting sh
+$ sleep 10
+(nothing happens for a little while)
+$
+```
+
+# 2png
+
+### 实验中遇到的问题
+为了使用sleep函数，需要包含相关头文件，我在阅读`user/user.h` 等头文件并结合控制台报错信息来确定需要在 `main` 函数中使用的头文件，最终成功调用 `sleep` 函数。
+
+### 实验心得
+实验要求我们阅读相关的代码，正确调用需要程序依赖相关的文件，理清参数传递和头文件依赖关系，避免参数传递出错或者头文件缺少导致的错误。还需要让系统支持sleep的调用，添加的makefile里来正确编译
+
+# pingpong
+
+### 实验目的
+编写一个使用 UNIX 系统调用 ''ping-pong'' 的程序 一对管道上两个进程之间的字节，每个进程对应一个进程 方向。 父级应向子级发送一个字节; 孩子应打印“<PID>：已接收ping”， 其中 <pid> 是其进程 ID， 将管道上的字节写入父级， 并退出; 父级应从子级读取字节， 打印 “<PID>： Received Pong”， 并退出。 你 解决方案应该在文件 user/pingpong.c 中。
+
+### 实验步骤
+1.创建管道
+```bash
+   int p1[2], p2[2];  // 两个管道，p1用于父进程向子进程发送数据，p2用于子进程向父进程发送数据
+    char buf[1];
+    pipe(p1);
+    pipe(p2);
+```
+2.使用fork创建子管道
+
+3.使用read读管道数据，write写管道数据
+
+4.使用getpid（）查找调用进程的id
+
+5.重复之前的步骤并编译
+
+6.运行并测试，在xv6 shell中运行该程序，输出结果如下：
+```bash
+$ pingpong
+4: received ping
+3: received pong
+$
+```
+程序源代码:
+```bash
+#include "kernel/types.h"
+#include "kernel/stat.h"
+#include "user/user.h"
+
+int main() {
+    int p1[2], p2[2];  // 两个管道，p1用于父进程向子进程发送数据，p2用于子进程向父进程发送数据
+    char buf[1];
+    pipe(p1);
+    pipe(p2);
+
+    if (fork() == 0) {  // 子进程
+        close(p1[1]);  // 关闭子进程中不需要的写端
+        close(p2[0]);  // 关闭子进程中不需要的读端
+
+        read(p1[0], buf, 1);  // 从父进程接收字节
+        printf("%d: received ping\n", getpid());
+
+        write(p2[1], "p", 1);  // 向父进程发送字节
+        close(p1[0]);  // 关闭管道读端
+        close(p2[1]);  // 关闭管道写端
+
+        exit(0);
+    } else {  // 父进程
+        close(p1[0]);  // 关闭父进程中不需要的读端
+        close(p2[1]);  // 关闭父进程中不需要的写端
+
+        write(p1[1], "p", 1);  // 向子进程发送字节
+
+        read(p2[0], buf, 1);  // 从子进程接收字节
+        printf("%d: received pong\n", getpid());
+
+        close(p1[1]);  // 关闭管道写端
+        close(p2[0]);  // 关闭管道读端
+
+        wait(0);  // 等待子进程结束
+        exit(0);
+    }
+}
+```
+# png3
+
+
+
