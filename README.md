@@ -7,7 +7,7 @@
 
 # Tools
 
-## 在Windows上安装WSL
+### 在Windows上安装WSL
 
 下载[Windows Subsystem for Linux](https://learn.microsoft.com/en-us/windows/wsl/install) 和 [Ubuntu on Windows](https://apps.microsoft.com/detail/9nblggh4msv6?hl=en-us&gl=us)。
 
@@ -19,7 +19,7 @@ C:\Users\17912>wsl --list --verbose
 * Ubuntu    Stopped         2
 ```
 
-## 软件源更新和环境准备
+### 软件源更新和环境准备
 
 确保上一步已完成
 启动Ubuntu，运行下列代码
@@ -29,7 +29,7 @@ $ sudo apt-get update && sudo apt-get upgrade
 $ sudo apt-get install git build-essential gdb-multiarch qemu-system-misc gcc-riscv64-linux-gnu binutils-riscv64-linux-gnu
 ```
 
-## 测试安装
+### 测试安装
 
 如果安装正常，运行下列命令行会显示如下的内容
 ```bash
@@ -46,7 +46,7 @@ This is free software; see the source for copying conditions.  There is NO
 warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 ```
 
-## 编译内核
+### 编译内核
 
 下载XV6的源码
 ```bash
@@ -55,7 +55,7 @@ $ git clone git://github.com/mit-pdos/xv6-riscv.git
 
 # Guidance
 
-## 调试提示
+### 调试提示
 
 1.理解 C 和指针：建议阅读《C 程序设计语言》（第二版）并做指针练习。如果不熟悉 C 的指针，会在实验中遇到很大困难。特别注意几个常见的指针习惯用法，比如 int *p = (int*)100 和 p[i] 等。
 
@@ -71,7 +71,7 @@ $ git clone git://github.com/mit-pdos/xv6-riscv.git
 
 本实验将使您熟悉 xv6 及其系统调用。
 
-## Boot xv6
+### Boot xv6
 
 1.获取实验室的 xv6 源代码并签出 util 分支：
 
