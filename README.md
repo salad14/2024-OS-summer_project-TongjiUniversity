@@ -496,3 +496,120 @@ while((n = read(0, buf, sizeof(buf))) > 0) {
 
 # png6
 
+### 实验中遇到的问题
+在最开始，由于我在最开始加了一个条件判断，导致有的时候无法读取到子文件，没能正确的输出hello。在查找到问题所在之后，我成功的处理了exec失败后继续执行的问题，正确的处理了文件之间的关系
+
+### 实验心得
+实验要求将输入按照空格拆分为多个参数，并将它们作为命令行参数传递给外部命令。我学会了如何处理命令行中的输入字符串，跳过空格，并将参数存储在适当的数据结构中。通过exec函数执行外部命令，我了解了进程创建替换的过程，学会了如何调试程序。
+
+# Lab: system calls
+
+在本实验中，您将向 XV6 添加一些新的系统调用，这将有所帮助 您了解它们的工作原理，并会让您接触到其中的一些 XV6 内核的内部结构。稍后将添加更多系统调用实验室。
+
+在开始编码之前，请阅读 [XV6 book](https://pdos.csail.mit.edu/6.828/2021/xv6/book-riscv-rev1.pdf)，以及 第 4 章第 4.3 和 4.4 节，以及 相关源文件：
+
+系统调用的用户空间代码是 在 user/user.h 和 user/usys.pl 中。
+内核空间代码 是 kernel/syscall.h、kernel/syscall.c。
+与进程相关的代码是 kernel/proc.h 和 kernel/proc.c。
+
+### 实验前准备
+若要启动实验室，请切换到 syscall 分支：
+```bash
+  $ git fetch
+  $ git checkout syscall
+  $ make clean
+```
+
+# System call tracing 
+### 实验目的
+旨在帮助了解系统调用跟踪的实现，以及如何修改 xv6 操作系统以添加新功能。我们需要添加一个有助于调试的新的trace系统调用。该功能包括创建一个名为 trace的系统调用，并将整数 "mask"作为参数。 "mask"的位数表示要跟踪哪些系统调用。通过实验，熟悉内核级编程，包括修改进程结构、处理系统调用和管理跟踪掩码。
+### 实验步骤
+首先，我们需要声明新的 trace 系统调用：
+1.在 kernel/syscall.h 中声明系统调用号：在 kernel/syscall.h 中为 SYS_trace 添加一个新的条目。选择一个未使用的系统调用号
+```bash
+#define SYS_trace 22
+```
+2.在 user/user.h 中声明 trace 系统调用的原型：
+```bash
+int trace(int mask);
+```
+3.在 user/usys.pl 中添加 trace 系统调用的条目：
+```bash
+entry("trace");
+```
+接下来，我们需要在内核中实现处理 trace 系统调用的函数：
+4.实现 sys_trace 函数，将 trace 掩码存储在进程的 proc 结构中：
+```bash
+uint64
+sys_trace(void)
+{
+    int mask;
+
+    if(argint(0, &mask) < 0)
+        return -1;
+
+    struct proc *p = myproc();
+    p->trace_mask = mask;
+
+    return 0;
+}
+```
+5.在 proc 结构体中添加一个新的字段 trace_mask，用于存储 trace 掩码：
+```bash
+ int trace_mask;  // 用于存储 trace 掩码的新字段
+```
+6.在 fork 函数中，将 trace_mask 从父进程复制到子进程：
+```bash
+np->trace_mask = p->trace_mask;
+```
+7.在 kernel/syscall.c 中添加系统调用名称数组：
+
+定义一个系统调用名称数组，方便打印系统调用的名称：
+```bash
+static char *syscall_names[] = {
+    "", "fork", "exit", "wait", "pipe", "read",
+    "kill", "exec", "fstat", "chdir", "dup",
+    "getpid", "sbrk", "sleep", "uptime", "open",
+    "write", "mknod", "unlink", "link", "mkdir",
+    "close", "trace"
+};
+```
+8.更新 syscall 函数，添加打印跟踪信息的逻辑：
+```bash
+void
+syscall(void)
+{
+    int num;
+    struct proc *p = myproc();
+
+    num = p->trapframe->a7;
+
+    if (num > 0 && num < NELEM(syscalls) && syscalls[num])
+    {
+        p->trapframe->a0 = syscalls[num]();
+        // 打印跟踪信息
+        if ((1 << num) & p->trace_mask) {
+            printf("%d: syscall %s -> %d\n", p->pid, syscall_names[num],
+                    p->trapframe->a0);
+        }
+    }
+    else
+    {
+        printf("%d %s: unknown sys call %d\n",
+               p->pid, p->name, num);
+        p->trapframe->a0 = -1;
+    }
+}
+```
+9.编译运行
+# png7
+### 实验中遇到的问题
+在最开始我编写完成后，出现了无法追踪全部系统调用的问题。后来发现问题出在没能正确的传递参数和数据上面，在查阅了相关的文档之后，解决了这个问题，避免了传参错误而导致的锁没能正确释放的问题。
+
+### 实验心得
+从这个实验中我学会了如何在xv6内核中添加新的系统调用，修改进程控制块和支持跟踪掩码。同时对于参数传递有了新的理解。
+
+# Sysinfo
+### 实验目的
+在本实验中将添加一个系统调用 sysinfo，用于收集运行系统的信息。系统调用需要一个参数：指向 struct sysinfo 的指针（参见kernel/sysinfo.h）。内核应填写该结构体的字段：freemem 字段应设置为可用内存的字节数，nproc 字段应设置为状态不是 UNUSED 的进程数。
+### 实验步骤
