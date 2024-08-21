@@ -613,3 +613,210 @@ syscall(void)
 ### 实验目的
 在本实验中将添加一个系统调用 sysinfo，用于收集运行系统的信息。系统调用需要一个参数：指向 struct sysinfo 的指针（参见kernel/sysinfo.h）。内核应填写该结构体的字段：freemem 字段应设置为可用内存的字节数，nproc 字段应设置为状态不是 UNUSED 的进程数。
 ### 实验步骤
+1.声明和定义系统调用
+在 kernel/syscall.h 中为 SYS_sysinfo 添加一个新的系统调用编号：
+```bash
+#define SYS_sysinfo 23
+```
+由于 sysinfo 函数需要使用 struct sysinfo，我们需要在 user/user.h 中预先声明这个结构体，并添加 sysinfo 的函数原型：
+```bash
+struct sysinfo;
+
+int sysinfo(struct sysinfo *);
+```
+在 user/usys.pl 中添加 sysinfo 的条目：
+```bash
+entry("sysinfo");
+```
+2.在内核中实现 sysinfo 系统调用，完成数据收集并将信息返回给用户空间。
+在 kernel/sysproc.c 文件中实现 sysinfo 函数：
+```bash
+uint64
+sys_sysinfo(void)
+{
+    struct sysinfo info;
+    struct sysinfo *uinfo;
+
+    if(argaddr(0, (uint64 *)&uinfo) < 0)
+        return -1;
+
+    // 获取空闲内存数
+    info.freemem = free_mem();
+    
+    // 获取正在使用的进程数
+    info.nproc = num_procs();
+
+    // 将信息复制到用户空间
+    if(copyout(myproc()->pagetable, (uint64)uinfo, (char *)&info, sizeof(info)) < 0)
+        return -1;
+
+    return 0;
+}
+```
+在 kernel/kalloc.c 中实现一个函数，用于返回当前空闲的内存字节数：
+```bash
+uint64
+free_mem(void)
+{
+    struct run *r;
+    uint64 free = 0;
+    acquire(&kmem.lock);
+    for(r = kmem.freelist; r; r = r->next)
+        free += PGSIZE;
+    release(&kmem.lock);
+    return free;
+}
+```
+在 kernel/proc.c 中实现一个函数，用于返回当前正在使用的进程数：
+```bash
+int
+num_procs(void)
+{
+    struct proc *p;
+    int count = 0;
+    for(p = proc; p < &proc[NPROC]; p++) {
+        if(p->state != UNUSED)
+            count++;
+    }
+    return count;
+}
+```
+3.在Makefile中添加
+$U/_sysinfotest
+
+4.编译调试运行
+
+### 实验中遇到的问题
+本次实验的难点在于从系统中收集运行的信息。我参考kalloc（）和kfree（）函数，学习得知内核通过 kmem.freelist 的一个链表维护未使用的内存，然后让链表每个结点对应的页表大小相乘得到可用内存数。在编写的过程中，我疏忽了外部调用的声明，给编写造成了麻烦。
+
+### 实验心得
+本次实验我成功为系统添加了一个新的系统调用 sysinfo，实现了收集运行系统的信息。在完成的过程中，我学会了分析问题，参考其他函数来收集自己需要的信息，同时也学会了查阅资料，深入研究。这次实验教育我在编写代码的时候需要细心，不要忽视外部调用需要声明。
+
+# test2
+
+# Lab: page tables
+
+在本实验中，您将浏览页表并将其修改为 加快某些系统调用的速度并检测已访问的页面。
+
+kern/memlayout.h，用于捕获内存的布局。
+kern/vm.c，其中包含大多数虚拟内存 （VM） 代码。
+kernel/kalloc.c，其中包含用于分配和 释放物理内存。
+
+若要启动实验室，请切换到 pgtbl 分支：
+
+```bash
+  $ git fetch
+  $ git checkout pgtbl
+  $ make clean
+```
+
+# Speed up system calls
+
+### 实验目的
+某些操作系统（例如 Linux）通过共享来加快某些系统调用的速度 用户空间和内核之间的只读区域中的数据。这消除了 执行这些系统调用时需要内核交叉。为了帮助您学习 如何将映射插入到页表中，您的首要任务就是实现这一点 对 xv6 中的 getpid（） 系统调用进行了优化。
+
+在 xv6 操作系统中优化 getpid() 系统调用，通过在用户空间和内核之间共享一个只读页面，从而减少内核切换的开销。具体而言，当每个进程被创建时，需要在 USYSCALL（memlayout.h 中定义的虚拟地址）映射一个只读页面，并在页面的起始处存储一个 struct usyscall 结构体（也在 memlayout.h 中定义），并将其初始化为存储当前进程的 PID。实验要求的用户空间函数 ugetpid() 已经提供，并会自动使用 USYSCALL 映射。
+
+### 实验步骤
+1.在 kernel/proc.h 的proc 结构体中添加指针来保存这个共享页面的地址。
+```bash
+struct usyscall *usyscallpage;
+```
+2.在函数allocproc()中，为每一个新创建的进程分配一个只读页，使用 mappages() 来创建页表映射。
+
+3.将 struct usyscall 结构放置在只读页的开头，并初始化其存储当前进程的 PID：
+
+在 kernel/proc.c 的 proc_pagetable(struct proc *p) 中将这个映射（PTE）写入 pagetable 中。
+
+4.在 kernel/proc.c 的 freeproc() 函数中，释放之前分配的只读页。
+
+5.编译运行
+
+# png8
+
+### 实验中遇到的问题
+在进行页面映射时，我遇到了编译出现的问题：
+```bash
+xv6 kernel is booting
+
+panic: release
+```
+
+表明在某个地方，代码尝试释放一个未被持有的锁。后来经过调试发现，我在某处错误的使用了freeproc()释放了锁，后面又手动释放了锁，因此出现了冲突问题，在我修改了这个问题后得以解决
+
+### 实验心得
+这个实验使我更深入地理解了系统调用的工作原理以及它们是如何在用户空间和内核空间之间进行通信的。通过在每个进程的页表中插入只读页，我掌握了页表操作的方法，实现了用户空间和内核空间的共享
+
+# Print a page table
+### 实验目的
+本实验的目标是编写一个函数 vmprint()，用于打印 RISC-V 页表的内容。通过这个实验，您将能够可视化页表的结构，并为以后的调试提供帮助。
+
+### 实验步骤
+1.在 kernel/vm.c 文件中定义 vmprint() 函数，该函数接受一个 pagetable_t 参数，并以特定格式打印该页表的内容。
+```bash
+void
+vmprint(pagetable_t pagetable)
+{
+  printf("page table %p\n", pagetable);
+  vmprint_walk(pagetable, 0, 0);
+}
+
+void
+vmprint_walk(pagetable_t pagetable, int depth, uint64 va)
+{
+  for (int i = 0; i < 512; i++) {
+    pte_t pte = pagetable[i];
+    if (pte & PTE_V) {
+      uint64 pa = PTE2PA(pte);
+      for (int j = 0; j < depth; j++) {
+        printf(" ..");
+      }
+      printf("%d: pte %p pa %p\n", i, pte, pa);
+      if ((pte & (PTE_R | PTE_W | PTE_X)) == 0) {
+        pagetable_t next_level = (pagetable_t)PTE2PA(pte);
+        vmprint_walk(next_level, depth + 1, va + (i << (12 + 9 * depth)));
+      }
+    }
+  }
+}
+```
+2.插入 vmprint() 调用：
+在 exec.c 文件中找到 exec() 函数，在 return argc 语句之前插入 if(p->pid == 1) vmprint(p->pagetable); 代码，确保在初始化进程执行完 exec() 之后打印该进程的页表。
+
+3.实现 vmprint() 函数：
+使用递归遍历页表的每一层，并按照缩进的格式打印页表项（PTE）。只打印有效的 PTE，忽略无效的 PTE。
+```bash
+void
+vmprint_walk(pagetable_t pagetable, int depth, uint64 va)
+{
+  for (int i = 0; i < 512; i++) {
+    pte_t pte = pagetable[i];
+    if (pte & PTE_V) {  // 仅打印有效的 PTE
+      uint64 pa = PTE2PA(pte);
+      
+      // 为每一层页表项打印适当的缩进
+      for (int j = 0; j <= depth; j++) {
+        printf(" ..");
+      }
+      
+      printf("%d: pte %p pa %p\n", i, pte, pa);
+      
+      // 如果 PTE 指向下一级页表，递归打印
+      if ((pte & (PTE_R | PTE_W | PTE_X)) == 0) {
+        pagetable_t next_level = (pagetable_t)PTE2PA(pte);
+        vmprint_walk(next_level, depth + 1, va + (i << (12 + 9 * depth)));
+      }
+    }
+  }
+}
+```
+4.使用 printf 打印 PTE 索引、PTE 位和物理地址，确保输出格式与实验要求一致。
+
+5.编译运行
+
+### 实验中遇到的问题
+在最开始递归打印的时候，我没能正确处理好递归层级的问题，导致打印错误。后来我参考了freewalk函数的形式，成功的解决了问题。在理解页表的层次结构时，可能显得过于抽象，但通过观察源码、结合课程教材中的图 3-4和解释 vmprint() 输出的页表内容，我可以更清晰地了解每个级别的页表是如何映射虚拟地址到物理地址的。
+
+### 实验心得
+通过本次实验，我可以清晰地通过vmprint() 的输出来查看页表的层次结构，从根页表开始，逐级向下指向不同级别的页表页，最终到达最底层的页表页，其中包含了实际的物理页框映射信息。
+这个实验加深了我对页表结构的理解，学会了如何在内核中操作位操作和宏定义，以及如何通过递归遍历页表来打印出整个页表的内容。
