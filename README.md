@@ -1043,3 +1043,101 @@ addr2line -e kernel/kernel 0x00000000800020e6 0x0000000080001fac 0x0000000080001
 在实现 backtrace() 过程中，我学习并理解了 RISC-V 架构下栈帧的布局和使用方式。每个栈帧保存了函数调用的返回地址和前一个栈帧的指针（帧指针 fp），这使得可以沿着帧指针链逐步回溯，找到调用链中的每个函数。这种理解对我来说是非常宝贵的，因为它不仅是操作系统内核中重要的概念之一，也是调试和分析软件问题的基础。
 
 # Alarm
+
+### 实验目的
+在本练习中，您将向 xv6 添加一个定期发出警报的功能 一个进程，因为它使用 CPU 时间。这对于计算受限可能很有用 想要限制它们消耗的 CPU 时间的进程，或者 想要计算但也希望定期进行一些计算的进程 行动。更一般地说，您将实现 用户级中断/故障处理程序;你可以使用类似的东西 例如，用于处理应用程序中的页面错误。您的解决方案 如果它通过了 alarmtest 和 userTests，则是正确的。
+
+### 实验步骤
+1.在 Makefile 中添加 alarmtest，使其可以作为用户程序进行编译。
+
+2.定义 sigalarm 和 sigreturn 系统调用
+在 user/user.h 中添加以下声明：
+```bash
+int sigalarm(int ticks, void (*handler)());
+int sigreturn(void);
+```
+
+在 user/usys.pl 中添加以下行：
+```bash
+entry("sigalarm");
+entry("sigreturn");
+```
+
+3.在 kernel/syscall.h 中添加 sigalarm 和 sigreturn 的系统调用号：
+```bash
+#define SYS_sigalarm  22
+#define SYS_sigreturn 23
+```
+在 kernel/syscall.c 中添加对应的系统调用函数：
+```bash
+extern uint64 sys_sigalarm(void);
+extern uint64 sys_sigreturn(void);
+
+[SYS_sigalarm]  sys_sigalarm,
+[SYS_sigreturn] sys_sigreturn,
+```
+
+4.在kernel/proc.h，将警报间隔和处理函数的指针存储在 proc 结构体的新字段中
+```bash
+uint64 handler_va;
+int alarm_interval;
+int passed_ticks;
+struct trapframe saved_trapframe;
+int have_return;
+```
+5.每次时钟中断发生时，硬件时钟会产生一个中断，这将在 usertrap() 函数中进行处理（位于 kernel/trap.c）。因此接下来需要修改 usertrap 函数，使得硬件时钟每滴答一次都会强制中断一次。
+```bash
+if(which_dev == 2) {
+    struct proc *proc = myproc();
+    if (proc->alarm_interval && proc->have_return) {
+        if (++proc->passed_ticks == 2) {
+        proc->saved_trapframe = *p->trapframe;
+        proc->trapframe->epc = proc->handler_va;
+        proc->passed_ticks = 0;
+        proc->have_return = 0;
+        }
+    }
+    yield();
+}
+```
+
+6.完成第一步骤的工作后，我们可能遇到 alarmtest 在打印 "alarm!"后在 test0 或 test1 中崩溃，或者是 alarmtest（最终）打印 "test1 失败"，或者是 alarmtest 退出时没有打印 "test1 通过"。
+
+因此，这一步涉及确保在处理完警报处理函数后，控制能够返回到被定时中断中断的用户程序指令处，同时保证寄存器的内容被恢复，以便用户程序能够在警报处理之后继续执行。最后，你需要在每次警报触发后 "重新激活" 定时器计数器，以便定时器定期触发处理函数的调用。
+
+用户警报处理程序在完成后必须调用 sigreturn 系统调用。请看 alarmtest.c 中的 periodic 示例。这意味着您可以在 usertrap 和 sys_sigreturn 中添加代码，使用户进程在处理完警报后恢复正常。
+
+我们可以编写一个符合要求的sys_sigreturn 函数：
+
+```bash
+uint64
+sys_sigreturn(void)
+{
+  struct proc* proc = myproc();
+  *proc->trapframe = proc->saved_trapframe;
+  proc->have_return = 1; // true
+  return proc->trapframe->a0;
+}
+```
+7.测试
+运行 alarmtest 并确保其能够正确地输出 "alarm!"。
+# png17
+
+运行 usertests 来确保你的修改没有影响到内核的其他部分。
+# png18
+
+### 实验中遇到的问题
+
+在最后测试时出现了panic: balloc: out of blocks 的错误
+```bash
+test writebig: panic: balloc: out of blocks
+```
+表示在分配磁盘块时，文件系统中的可用块已经耗尽。这通常与文件系统的大小配置和测试过程中创建的文件数量有关。
+我查阅资料得知writebig，会尝试写入大量数据以测试文件系统的极限。在块数不足的情况下，系统无法再为新数据分配块，从而触发 balloc 函数的错误。因此在我对宏定义#define FSSIZE   修改后，将文件系统的块数增加到了2000，解决了这个问题
+
+### 实验心得
+在本次实验中，我深入理解并实现了 xv6 操作系统中的一个关键功能：定期警报机制。通过为 xv6 添加 sigalarm 和 sigreturn 系统调用，我学到了如何在操作系统层面管理定时事件，并让用户空间的进程能够对这些事件做出响应。这种机制的实现对增强操作系统的灵活性和功能性具有重要意义，尤其是在处理实时系统或需要定期执行任务的场景中。
+
+在实现过程中，最大的挑战是正确处理寄存器的保存和恢复，以及在处理程序执行完毕后确保进程能够从中断点继续无缝执行。这要求我对 xv6 的中断处理流程、进程状态管理以及系统调用机制有深入的理解。
+
+通过这次实验，我不仅加深了对操作系统内部机制的认识，还提高了调试和解决复杂问题的能力，特别是在涉及底层系统编程的场景中。这些经验将对我今后处理更复杂的操作系统问题提供宝贵的帮助。
