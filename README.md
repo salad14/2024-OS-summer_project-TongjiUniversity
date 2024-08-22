@@ -828,4 +828,218 @@ vmprint_walk(pagetable_t pagetable, int depth, uint64 va)
 你的工作是实现 pgaccess（），这是一个报告已访问页面函数。系统调用采用三个参数。首先，它需要检查的第一个用户页面的起始虚拟地址。其次，它需要检查的页数。最后，它将用户地址带到缓冲区进行存储 将结果转换为 Bitmask（一种每页使用一位的数据结构，其中 第一页对应于最低有效位）。您将收到完整的 如果 PGCacess 测试用例在以下情况下通过，则为实验室的这一部分提供信用 运行 pgtbltest。
 
 ### 实验步骤
-1
+1.在kernel/riscv.h中定义访问位PTE_A。根据RISC-V手册，我们得知PTE_A位的值为0x040
+
+2.解析系统调用sys_pgaccess()的三个参数
+start_va：第一个用户页面的起始虚拟地址。
+num_pages：要检查的页面数量。
+user_mask：一个用户空间的地址，用于存储结果的位掩码。
+通过 argaddr() 和 argint() 函数来解析传递进来的参数。如果参数解析失败，返回 -1 表示错误。
+```bash
+    uint64 start_va;
+    int num_pages;
+    uint64 user_mask;
+
+    // 解析系统调用的参数
+    if(argaddr(0, &start_va) < 0)
+        return -1;
+    if(argint(1, &num_pages) < 0)
+        return -1;
+    if(argaddr(2, &user_mask) < 0)
+        return -1;
+```
+
+3.为了避免处理过大的内存范围，函数限制可以检查的最大页面数量。这里设定最大检查的页面数为 64。如果请求的页面数超过这个限制，则返回 -1。
+```bash
+  if(num_pages > 64)
+        return -1;
+```
+
+4.遍历指定范围的页面并检查访问位。
+walk() 函数用于获取页表项（PTE），其中包含了虚拟地址到物理地址的映射信息。
+如果 pte 为 0，说明没有找到对应的页表项，跳过该页面。
+如果 pte 存在且其访问位（PTE_A）被设置，表示该页面已被访问。此时，将对应位（1L << i）设置到 mask 中。
+检查访问位后，清除 PTE_A 位，以便下次调用时可以正确检测新访问的页面。
+```bash
+    for(int i = 0; i < num_pages; i++) {
+        pte_t *pte = walk(p->pagetable, start_va + i * PGSIZE, 0);
+        if(pte == 0)
+            continue;
+
+        // 检查访问位并更新掩码
+        if(*pte & PTE_A) {
+            mask |= (1L << i);
+            // 清除访问位
+            *pte &= ~PTE_A;
+        }
+    }
+```
+
+5.将结果从内核空间复制到用户空间即可
+
+6.实现完成，编译运行
+
+### 实验中遇到的问题
+在实验中如何清除PTE_A的访问位困扰了我很久，在多次查阅资料后得知，我可以采用检测pte的方式，如果 pte 为 0，说明没有找到对应的页表项，跳过该页面。如果 pte 存在且其访问位（PTE_A）被设置，表示该页面已被访问。此时，将对应位（1L << i）设置到 mask 中。
+检查访问位后，清除 PTE_A 位，以便下次调用时可以正确检测新访问的页面。我成功的解决了问题
+
+### 实验心得
+通过这个实验，我学习了操作系统的内存管理机制，包括页表的结构和作用；理解了如何为进程分配页表，映射虚拟地址到物理地址，以及如何使用页表权限来实现不同的访问控制。我学会了如何查看代码文档来解决问题的能力。
+
+# png9
+
+# Lab: traps
+本实验探讨了如何使用陷阱实现系统调用。 您将首先使用堆栈进行热身练习，然后您将实现用户级陷阱处理的示例。
+若要启动实验室，请切换到陷阱分支：
+```bash
+ $ git fetch
+  $ git checkout traps
+  $ make clean
+```
+
+# RISC-V assembly
+了解一些 RISC-V 汇编很重要。在 xv6 repo 中有一个文件 user/call.c。make fs.img 会对其进行编译，并生成 user/call.asm 中程序的可读汇编版本。
+
+阅读 call.asm 中的 g ，f ，和 main 函数。
+
+回答下面的问题：
+
+**Q. 01**
+
+> **Which registers contain arguments to functions? For example, which register holds 13 in main's call to `printf`?**
+
+在 RISC-V 架构中，函数调用的前8个参数是通过寄存器传递的，分别是 a0 到 a7。具体来说：
+
+a0：第1个参数
+a1：第2个参数
+依此类推
+查看call.asm文件中的main函数可知，在 main 调用 printf 时，由寄存器 a2 保存 13。
+
+# png 10
+
+**Q. 02**
+
+> **Where is the call to function f in the assembly code for main?
+> Where is the call to g? (Hint: the compiler may inline functions.)**
+
+查看call.asm文件中的f和g函数可知，函数 f 调用函数 g ；函数 g 使传入的参数加 3 后返回。
+# png 11
+编译器会进行内联优化，即一些编译时可以计算的数据会在编译时得出结果，而不是进行函数调用。查看 main 函数可以发现，printf 中包含了一个对 f 的调用。但是对应的会汇编代码却是直接将 f(8)+1 替换为 12 。这就说明编译器对这个函数调用进行了优化，所以对于 main 函数的汇编代码来说，其并没有调用函数 f 和 g ，而是在运行之前由编译器对其进行了计算。
+# png 12
+
+**Q. 03**
+
+> **At what address is the function printf located?**
+# png13
+
+查阅得到其地址在 0x628。
+
+**Q. 04**
+
+> **What value is in the register ra just after the jalr to printf in main?**
+0：使用 auipc ra,0x0 将当前程序计数器 pc 的值存入 ra 中。
+
+34：jalr 1536(ra) 跳转到偏移地址 printf 处，也就是 0x630 的位置。
+
+根据 reference1 中的信息，在执行完这句命令之后， 寄存器 ra 的值设置为 pc + 4 ，也就是 return address 返回地址 0x38。即jalr 指令执行完毕之后，ra 的值为 0x38.
+
+# png14
+
+**Q. 05**
+
+> Run the following code.
+>
+> ```
+> 	unsigned int i = 0x00646c72;
+> 	printf("H%x Wo%s", 57616, &i);
+> ```
+>
+> What is the output? [Here's an ASCII table]([ASCII Table - ASCII Character Codes, HTML, Octal, Hex, Decimal](https://www.asciitable.com/)) that maps bytes to characters.
+>
+> The output depends on that fact that the RISC-V is little-endian. If the RISC-V were instead big-endian what would you set `i` to in order to yield the same output? Would you need to change `57616` to a different value?
+>
+> [Here's a description of little- and big-endian](http://www.webopedia.com/TERM/b/big_endian.html) and [a more whimsical description](http://www.networksorcery.com/enp/ien/ien137.txt).
+
+运行结果：打印出了 He110 World。
+
+i 的值是 0x00646c72，它表示的字符串是 rl，因为 RISC-V 是小端序，所以字节顺序是反的。
+
+57616 在十六进制中是 e110。
+
+故输出 He110 World
+
+**Q. 06**
+> In the following code, what is going to be printed after `'y='`? (note: the answer is not a specific value.) Why does this happen?
+>
+> ```c
+> 	printf("x=%d y=%d", 3);
+> ```
+
+printf 函数期望有两个参数：x 和 y。
+由于代码中只传递了一个参数 3，所以 y 部分的输出将是未定义的行为，可能会打印一些垃圾值，因为第二个参数 y 没有提供。
+可能导致 y 打印出一个随机的值或导致程序崩溃。
+
+# Backtrace
+
+### 实验目的
+实现一个回溯（backtrace）功能，用于在操作系统内核发生错误时，输出调用堆栈上的函数调用列表。这有助于调试和定位错误发生的位置。
+
+### 实验步骤
+1.在 kernel/printf.c 中实现 backtrace() 函数
+backtrace() 函数需要遍历当前堆栈帧，找到每个调用者的返回地址并将其打印出来。
+```bash
+void backtrace(void) {
+    uint64 fp = r_fp();  // 获取当前帧指针
+    printf("backtrace:\n");
+    
+    while(fp!= PGROUNDDOWN(fp)) {
+	    printf("%p\n", *(uint64*)(fp-8));
+	    fp = *(uint64*)(fp - 16);
+  }
+}
+```
+2.为了在其他地方调用 backtrace()，我们需要在 kernel/defs.h 中添加其原型。
+```bash
+void backtrace(void);
+```
+
+3.r_fp() 函数用于获取当前函数的帧指针（即 s0 寄存器的值）。这是一个内联汇编函数，可以帮助我们获取当前栈帧指针。
+```bash
+static inline uint64
+r_fp()
+{
+    uint64 x;
+    asm volatile("mv %0, s0" : "=r" (x));
+    return x;
+}
+```
+4.打开 kernel/sysproc.c 文件，并在 sys_sleep() 函数中调用 backtrace().这样，我们可以测试backtrace（）。
+
+5.编译运行后，运行bttest
+
+# png15
+
+6.退出QEMU，使用addr2line 将输出的地址转换为具体的源代码行：
+'''bash
+addr2line -e kernel/kernel 0x00000000800020e6 0x0000000080001fac 0x0000000080001c96
+'''
+
+我们可以看到如下输出
+
+# png16
+
+7.为了在内核崩溃时获取调用栈信息，可以在 panic() 函数中调用 backtrace()。
+
+打开 kernel/printf.c 文件，找到 panic() 函数，并添加对 backtrace() 的调用。
+
+### 实验中遇到的问题
+
+起初，我在 backtrace() 函数中使用了错误的格式化字符串，导致地址打印不正确。通过调试，我意识到在内核环境下需要更加小心地处理打印格式，并确保栈帧的指针在遍历过程中始终指向有效的内存区域。
+
+此外，通过使用 addr2line 工具将返回地址映射回源码行，我成功地验证了 backtrace() 输出的正确性。这使我进一步体会到工具在调试和分析代码中的重要性。
+
+### 实验心得
+在这次实验中，我实现了 backtrace() 函数，用于在 RISC-V 架构下的 xv6 操作系统中获取并打印当前的函数调用栈。当内核遇到错误或者需要调试时，backtrace() 函数可以帮助我们跟踪并分析函数调用的历史，定位问题的根源。通过这一实验，我对操作系统内核的栈帧结构、函数调用的工作机制以及如何调试内核有了更深入的理解。
+在实现 backtrace() 过程中，我学习并理解了 RISC-V 架构下栈帧的布局和使用方式。每个栈帧保存了函数调用的返回地址和前一个栈帧的指针（帧指针 fp），这使得可以沿着帧指针链逐步回溯，找到调用链中的每个函数。这种理解对我来说是非常宝贵的，因为它不仅是操作系统内核中重要的概念之一，也是调试和分析软件问题的基础。
+
+# Alarm
