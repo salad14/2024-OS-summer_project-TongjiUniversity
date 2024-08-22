@@ -1,7 +1,8 @@
 # 2024-OS-summer_project-TongjiUniversity
 
 刘继业 2252752 Tongji University, 2024 Summer, Du BoWen 2024/8/26-8/30  
-来源代码: [https://github.com/salad14/2024-OS-summer_project-TongjiUniversity](https://github.com/salad14/2024-OS-summer_project-TongjiUniversity)
+
+代码: [https://github.com/salad14/2024-OS-summer_project-TongjiUniversity](https://github.com/salad14/2024-OS-summer_project-TongjiUniversity)
 
 各个实验的代码可切换不同的Branch查看
 
@@ -820,3 +821,11 @@ vmprint_walk(pagetable_t pagetable, int depth, uint64 va)
 ### 实验心得
 通过本次实验，我可以清晰地通过vmprint() 的输出来查看页表的层次结构，从根页表开始，逐级向下指向不同级别的页表页，最终到达最底层的页表页，其中包含了实际的物理页框映射信息。
 这个实验加深了我对页表结构的理解，学会了如何在内核中操作位操作和宏定义，以及如何通过递归遍历页表来打印出整个页表的内容。
+
+# Detecting which pages have been accessed
+### 实验目的
+一些垃圾回收器（一种自动内存管理形式）可以从中受益 从有关已访问（读取或写入）的页面的信息中。作为实验的一部分，您将向 XV6 添加一个新功能，用于检测并报告此问题 通过检查RISC-V页表中的访问位，将信息发送到用户空间。每当RISC-V硬件页面行走器解析时，它都会在PTE中标记这些位 TLB 未命中。
+你的工作是实现 pgaccess（），这是一个报告已访问页面函数。系统调用采用三个参数。首先，它需要检查的第一个用户页面的起始虚拟地址。其次，它需要检查的页数。最后，它将用户地址带到缓冲区进行存储 将结果转换为 Bitmask（一种每页使用一位的数据结构，其中 第一页对应于最低有效位）。您将收到完整的 如果 PGCacess 测试用例在以下情况下通过，则为实验室的这一部分提供信用 运行 pgtbltest。
+
+### 实验步骤
+1
