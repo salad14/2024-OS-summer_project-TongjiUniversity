@@ -1602,4 +1602,701 @@ tcpdump -XXnr packets.pcap
 
 ### Your Job 
 
+你的工作是完成 e1000_transmit（） 和 e1000_recv（） ， 都在 kernel/e1000.c 中， 以便驱动程序可以发送和接收数据包。 当 make grade 说你的 solution 通过所有测试。
+
+在编写代码时，您会发现自己在参考 E1000 软件开发人员手册。特别有帮助的是以下部分：
+
+第 2 节是必不可少的，它概述了整个设备。
+第 3.2 节概述了数据包接收。
+第 3.3 节和第 3.4 节一起概述了数据包传输。
+第 13 节概述了 E1000 使用的寄存器。
+第 14 节可以帮助您了解我们提供的 init 代码。
+
+
+### 实验步骤
+1.了解网络设备： 使用E1000的网络设备来处理网络通信。这个虚拟设备模拟了一个真实的硬件连接到真实的以太网局域网（LAN）。在xv6中，E1000看起来就像连接到真实LAN的硬件设备。你需要了解如何在xv6中与这个虚拟设备进行通信。
+
+2.实现驱动函数： 在kernel/e1000.c文件中完成e1000_transmit()和e1000_recv()函数。e1000_transmit()函数用于发送数据包，而e1000_recv()函数用于接收数据包。我们在 e1000.c 中提供的 e1000_init() 函数可配置 E1000 从 RAM 中读取要传输的数据包，并将接收到的数据包写入 RAM。这种技术称为 DMA（直接内存访问），指的是 E1000 硬件直接将数据包写入/读出 RAM。
+
+3.e1000_transmit() 函数实现
+该函数的主要功能是将数据包写入发送描述符环（TX ring）并通知 E1000 设备开始传输。
+
+获取传输环索引并检查描述符状态：
+```bash
+acquire(&e1000_lock);
+int idx = regs[E1000_TDT];
+if ((tx_ring[idx].status & E1000_TXD_STAT_DD) == 0) {
+    release(&e1000_lock);
+    return -1; // 如果描述符未完成传输，则返回
+}
+```
+acquire(&e1000_lock);：我们使用自旋锁来保护共享资源（如描述符环和相关寄存器）免受并发访问的影响。在多线程或多进程环境中，这样可以防止多个线程同时访问和修改同一块数据，从而避免竞争条件。
+
+int idx = regs[E1000_TDT];：E1000_TDT（Transmit Descriptor Tail）寄存器保存了发送描述符环中的当前尾索引，即下一个将被使用的描述符的位置。通过读取该寄存器，我们得知 E1000 设备期望发送的下一个数据包应存放在哪个位置。
+
+if ((tx_ring[idx].status & E1000_TXD_STAT_DD) == 0)：E1000_TXD_STAT_DD 是描述符状态中的一个位，表示数据包是否已经传输完成。如果该位未设置，说明 E1000 仍在传输之前的数据包，因此当前描述符尚未准备好被复用。如果遇到这种情况，我们应该返回错误并退出，以避免覆盖未完成传输的数据。
+
+释放之前使用的 mbuf 并更新描述符：
+```bash
+if (tx_mbufs[idx]) mbuffree(tx_mbufs[idx]);
+tx_mbufs[idx] = m;
+tx_ring[idx].length = m->len;
+tx_ring[idx].addr = (uint64)m->head;
+tx_ring[idx].cmd = E1000_TXD_CMD_RS | E1000_TXD_CMD_EOP;
+```
+if (tx_mbufs[idx]) mbuffree(tx_mbufs[idx]);：如果之前描述符指向的 mbuf（内存缓冲区）不为空，我们需要释放它，以便新的数据包可以被存储。这是为了防止内存泄漏，确保每个数据包都能在发送后被正确释放。
+
+tx_mbufs[idx] = m;：将当前要发送的 mbuf 指针存储在 tx_mbufs 数组中，以便在发送完成后可以访问并释放这个缓冲区。
+
+tx_ring[idx].length = m->len;：设置描述符的长度字段为数据包的长度。这样，E1000 设备在发送数据包时知道需要发送多少字节的数据。
+
+tx_ring[idx].addr = (uint64)m->head;：设置描述符的地址字段为数据包的起始地址。这是 E1000 设备在传输数据包时需要访问的内存位置。
+
+tx_ring[idx].cmd = E1000_TXD_CMD_RS | E1000_TXD_CMD_EOP;：设置描述符的命令字段。E1000_TXD_CMD_RS 表示在数据包发送完成后，E1000 设备应更新描述符的状态字段。E1000_TXD_CMD_EOP 表示这是一个完整的数据包（即数据包的结束部分），无需再追加其他数据包。
+
+更新传输描述符尾寄存器并释放锁：
+```bash
+regs[E1000_TDT] = (idx + 1) % TX_RING_SIZE;
+release(&e1000_lock);
+return 0;
+```
+regs[E1000_TDT] = (idx + 1) % TX_RING_SIZE;：将传输描述符尾寄存器 E1000_TDT 更新为下一个位置。这告诉 E1000 设备我们已经准备好发送数据包，设备应该开始传输数据。通过 mod 操作（% TX_RING_SIZE），我们确保索引在描述符环内循环。
+
+release(&e1000_lock);：释放自旋锁，以允许其他线程或进程访问共享资源。
+
+return 0;：成功返回，表示数据包已成功添加到传输队列中。
+
+4.e1000_recv() 函数实现
+
+该函数的主要功能是从接收描述符环（RX ring）中读取数据包并传递给网络协议栈处理。
+
+获取接收环索引并检查描述符状态：
+```bash
+int idx = (regs[E1000_RDT] + 1) % RX_RING_SIZE;
+while(rx_ring[idx].status & E1000_RXD_STAT_DD) {
+    rx_mbufs[idx]->len = rx_ring[idx].length;
+    net_rx(rx_mbufs[idx]); // 将 mbuf 传递给上层协议栈
+```
+int idx = (regs[E1000_RDT] + 1) % RX_RING_SIZE;：E1000_RDT（Receive Descriptor Tail）寄存器保存了接收描述符环中的尾索引。通过读取并增加 1，我们可以得到下一个应处理的数据包的位置。这里同样通过 mod 操作保证索引在描述符环内循环。
+
+while(rx_ring[idx].status & E1000_RXD_STAT_DD)：E1000_RXD_STAT_DD 是接收描述符状态中的一个位，表示数据包是否已经被接收并写入内存。如果该位被设置，表示有新数据包可供处理。while 循环会遍历所有可用的接收描述符，处理每一个接收到的数据包。
+
+rx_mbufs[idx]->len = rx_ring[idx].length;：将接收描述符中的数据包长度记录到 mbuf 中，以便上层协议栈能够正确处理数据包。
+
+net_rx(rx_mbufs[idx]);：net_rx() 是一个网络协议栈的入口函数，负责处理接收到的以太网帧。它会解析数据包，并根据其类型（如 IP、ARP）将数据包分发到相应的处理函数。
+
+分配新的 mbuf 并更新描述符：
+
+```bash
+    rx_mbufs[idx] = mbufalloc(0);
+    rx_ring[idx].status = 0;
+    rx_ring[idx].addr = (uint64)rx_mbufs[idx]->head;
+    regs[E1000_RDT] = idx;
+    idx = (idx + 1) % RX_RING_SIZE;
+}
+```
+rx_mbufs[idx] = mbufalloc(0);：接收描述符环中的每个描述符需要有一个对应的 mbuf 缓冲区，用于存放接收到的数据。在处理完当前数据包后，我们为描述符分配一个新的 mbuf 缓冲区，以便接收下一个数据包。
+
+rx_ring[idx].status = 0;：清除描述符的状态位，以便下次可以重复使用该描述符。
+
+rx_ring[idx].addr = (uint64)rx_mbufs[idx]->head;：将新的 mbuf 缓冲区地址存储到接收描述符中，以便 E1000 设备在下次接收数据包时知道将数据写入何处。
+
+regs[E1000_RDT] = idx;：更新接收描述符尾寄存器 E1000_RDT，通知 E1000 设备我们已处理完此数据包并已准备好接收新的数据包。
+
+idx = (idx + 1) % RX_RING_SIZE;：循环更新索引，准备处理下一个描述符。
+
+
+5.编译调试，使用make grade测试
+
+# png24
+
+### 实验中遇到的问题
+在实验过程中，我遇到了一个问题，当运行 nettests 时，测试卡在了 ping 部分，没有任何输出，系统似乎在等待某些操作完成。我怀疑问题出在 E1000 驱动程序的 e1000_transmit() 或 e1000_recv() 函数中，因为这些函数负责数据包的发送和接收。如果这两个函数没有正确工作，数据包就无法传输或接收，导致测试卡住。
+
+为了解决这个问题，我首先在 e1000_transmit() 和 e1000_recv() 函数中添加了调试输出，以确认它们是否被正确调用，以及描述符环是否正常更新。通过观察调试输出，我发现 e1000_transmit() 中的描述符状态未正确更新，导致 E1000 设备无法发送数据包。我修改了相关代码，确保在每次发送数据包后正确更新 E1000_TDT 寄存器，并在 e1000_recv() 中正确处理接收到的数据包，最终问题得以解决，nettests 测试顺利通过。
+
+### 实验心得
+在本次实验中，我深入探索了 E1000 网卡驱动程序的实现，并且通过解决实际问题，进一步理解了计算机网络和操作系统之间的协作机制。实验过程中，我遇到了 nettests 测试卡住的问题，这促使我反思驱动程序中数据包的发送与接收逻辑。通过在 e1000_transmit() 和 e1000_recv() 函数中添加调试输出，我得以逐步排查错误，发现问题的根源在于描述符环的更新不正确以及接收数据包时的处理逻辑不完善。
+
+在修复这些问题的过程中，我不仅加深了对描述符环和寄存器操作的理解，还体会到了驱动程序开发中细节管理的重要性。从这个实验中，我学会了如何通过调试和迭代改进代码，同时也认识到在驱动程序设计中，确保每一个细节都得到正确处理是多么关键。通过这次实验，我的动手能力和问题解决技巧得到了进一步提升，也为我将来更复杂的系统编程打下了坚实的基础。
+
+# Lab: locks
+在本实验中，您将获得重新设计代码的经验，以提高 排比。多核并行性差的常见症状 machines 是高锁争用。提高并行度通常涉及 更改数据结构和锁定策略，以便 减少争用。您将对 xv6 内存分配器和 块缓存。
+
+实验开始前，请切换到lock分支
+
+```bash
+  $ git fetch
+  $ git checkout lock
+  $ make clean
+```
+
+# Memory allocator
+### 实验目的
+本实验的目的是通过重新设计 xv6 操作系统的内存分配器，以减少由于锁争用导致的性能瓶颈。当前的内存分配器使用单一的空闲列表，由单个锁保护，多个 CPU 在并发访问时容易产生锁争用，导致性能下降。通过实现每个 CPU 独立的空闲列表，并处理空闲列表为空时的内存窃取问题，我们希望显著减少锁争用，提高系统的并发性能。
+
+### 实验步骤
+1.修改kmem为kmem[NCPU] kmem[NCPU] 是一个包含 NCPU 个元素的数组，每个元素都包含一个自旋锁 lock 和一个指向空闲内存块的指针 freelist。NCPU 表示系统中的 CPU 数量。这样设计的目的是为每个 CPU 提供独立的内存管理结构，减少全局锁争用。
+
+2.修改 kinit() 函数:
+
+kinit() 函数负责初始化内存分配器。在多核环境下，我们需要为每个 CPU 分配独立的空闲列表和锁，并将可用的内存页分配到这些列表中。
+```bash
+void
+kinit()
+{
+  // 初始化每个 CPU 的 kmem 锁
+  for(int i = 0; i < NCPU; i++) {
+    initlock(&kmem[i].lock, "kmem");
+    kmem[i].freelist = 0;
+  }
+  
+  // 将可用的内存范围分配到各个 CPU 的空闲列表中
+  freerange(end, (void*)PHYSTOP);
+}
+```
+我们首先通过循环初始化每个 CPU 的自旋锁 kmem[i].lock，并将 freelist 指针初始化为 0。然后，通过调用 freerange() 函数，将可用的物理内存页均匀分配到各个 CPU 的空闲列表中。
+
+3.修改 freerange() 函数
+freerange() 函数负责将一段物理内存释放到空闲列表中。在多核环境下，这些内存页应被分配到调用 CPU 的空闲列表中。
+```bash
+void
+freerange(void *pa_start, void *pa_end)
+{
+  char *p;
+  p = (char*)PGROUNDUP((uint64)pa_start);
+  
+  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE) {
+    int cpu = cpuid();  // 获取当前 CPU 编号
+    
+    push_off();  // 关闭中断，防止并发问题
+    acquire(&kmem[cpu].lock);  // 获取当前 CPU 的 kmem 锁
+
+    // 将页添加到当前 CPU 的空闲列表中
+    struct run *r = (struct run *)p;
+    r->next = kmem[cpu].freelist;
+    kmem[cpu].freelist = r;
+
+    release(&kmem[cpu].lock);  // 释放锁
+    pop_off();  // 恢复中断
+  }
+}
+```
+
+通过使用 cpuid() 获取当前 CPU 的编号，并将内存页释放到相应 CPU 的空闲列表中。通过 push_off() 和 pop_off() 确保操作过程中不受中断干扰，从而保证并发的安全性。
+
+4.修改 kalloc() 函数
+kalloc() 函数负责分配一个内存页。我们首先尝试从当前 CPU 的空闲列表中分配内存，如果当前 CPU 的空闲列表为空，则尝试从其他 CPU 的空闲列表中窃取内存。
+
+```bash
+void *
+kalloc(void)
+{
+  struct run *r;
+  int cpu = cpuid();
+
+  push_off();  // 关闭中断，防止并发问题
+  acquire(&kmem[cpu].lock);  // 获取当前 CPU 的 kmem 锁
+
+  r = kmem[cpu].freelist;  // 尝试从当前 CPU 的空闲列表中获取页面
+  if(r)
+    kmem[cpu].freelist = r->next;  // 如果成功获取页面，将空闲列表指针移到下一个页面
+
+  release(&kmem[cpu].lock);  // 释放当前 CPU 的锁
+
+  if(!r) {  // 如果当前 CPU 的空闲列表为空，尝试从其他 CPU 的空闲列表中获取页面
+    for(int i = 0; i < NCPU; i++) {
+      if(i == cpu)  // 跳过当前 CPU
+        continue;
+      
+      acquire(&kmem[i].lock);  // 获取其他 CPU 的 kmem 锁
+      r = kmem[i].freelist;  // 尝试从其他 CPU 的空闲列表中获取页面
+      if(r) {
+        kmem[i].freelist = r->next;  // 如果成功获取页面，将空闲列表指针移到下一个页面
+        release(&kmem[i].lock);  // 释放其他 CPU 的锁
+        break;
+      }
+      release(&kmem[i].lock);  // 如果没有获取到页面，继续尝试下一个 CPU
+    }
+  }
+
+  pop_off();  // 恢复中断
+
+  if(r)
+    memset((char*)r, 5, PGSIZE);  // 填充页面内容以帮助调试
+  return (void*)r;
+}
+```
+首先尝试从当前 CPU 的空闲列表中获取内存页，如果当前 CPU 的列表为空，则循环遍历其他 CPU 的空闲列表进行内存窃取。push_off() 和 pop_off() 用于保证整个分配过程中的原子性。
+
+5.
+修改 kfree() 函数
+kfree() 函数负责释放一个内存页，将其返回到当前 CPU 的空闲列表中。
+```bash
+void
+kfree(void *pa)
+{
+  struct run *r;
+
+  // 检查释放的页面是否对齐到页边界，并确保地址在合法的物理内存范围内
+  if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
+    panic("kfree");
+
+  // 用垃圾数据填充内存以捕获悬空引用
+  memset(pa, 1, PGSIZE);
+
+  r = (struct run*)pa;
+
+  int cpu = cpuid();  // 获取当前 CPU 编号
+  push_off();  // 关闭中断，防止并发问题
+  acquire(&kmem[cpu].lock);  // 获取当前 CPU 的 kmem 锁
+
+  // 将页面添加到当前 CPU 的空闲列表中
+  r->next = kmem[cpu].freelist;
+  kmem[cpu].freelist = r;
+
+  release(&kmem[cpu].lock);  // 释放锁
+  pop_off();  // 恢复中断
+}
+```
+
+6.运行 kalloctest 测试，查看锁的竞争情况是否减少，确认你的实现是否成功降低了锁的争用。
+# png25
+
+7.运行 usertests sbrkmuch 测试，确保内存分配器仍然能够正确分配所有内存。
+
+# png26
+
+8.运行 usertests 测试，确保所有的用户测试都通过。
+
+# png27
+
+### 实验中遇到的问题
+在实验过程中，我遇到了一个意外的问题。当我运行 kalloctest 测试时，发现系统在尝试分配和释放内存时表现出异常的锁争用，导致测试的性能远低于预期。我意识到，虽然我已经为每个 CPU 创建了独立的空闲列表和锁，但在实际操作中，由于内存页的释放和分配频繁发生在不同的 CPU 上，仍然存在大量的锁争用，特别是在多个 CPU 之间频繁窃取内存页时。
+
+为了解决这个问题，我进一步优化了 kalloc() 和 kfree() 函数，减少了跨 CPU 的内存窃取操作，并且在 kfree() 中引入了更细粒度的锁定机制。具体而言，我确保内存页尽可能在其所属的 CPU 上被分配和释放，避免不必要的跨 CPU 操作。这种改进显著减少了锁争用，提高了系统的整体并发性能，最终使得 kalloctest 测试顺利通过，并且性能大大提升。
+
+### 实验心得
+
+在此次实验中，我深入探索了 xv6 操作系统中的内存分配机制，并成功地优化了其在多核环境下的并发性能。通过为每个 CPU 创建独立的空闲列表和锁，我学会了如何有效减少锁争用问题，提升系统的并发处理能力。这一过程不仅加深了我对操作系统内存管理的理解，也让我体会到了并行编程中的挑战与复杂性。
+
+
+
+# Buffer cache
+
+### 实验目的
+本实验的目的是优化 xv6 操作系统中的块缓存（block cache）系统，减少在多进程密集使用文件系统时对 bcache.lock 的锁争用。通过引入哈希表结构，并对每个哈希桶（hash bucket）使用单独的锁，我们期望显著降低 bcache.lock 的获取次数，从而提高系统的并发性能。最终，我们希望通过运行 bcachetest 测试，确保所有 bcache 相关的锁争用次数接近零（或总和少于 500），并确保系统在并发情况下仍然能正确运行。
+
+### 实验步骤
+1.了解现有的 bcache 实现
+首先，阅读 kernel/bio.c 中的现有代码，了解 bcache 的工作原理。当前 bcache.lock 保护了缓存块的列表、缓存块的引用计数（b->refcnt）以及缓存块的标识符（b->dev 和 b->blockno）。
+
+2.定义哈希桶结构并初始化
+在 buf.h 中定义哈希桶结构 struct bucket。每个桶包含一个自旋锁和一个双向链表头，用于管理缓存的块缓冲区。
+在 bio.c 中创建 bcache 结构体，其中包含缓冲区数组和哈希桶数组。
+```bash
+struct bucket {
+  struct spinlock lock;
+  struct buf head; // 双向链表头，用于管理缓存的块缓冲区
+};
+
+struct {
+  struct buf buf[NBUF]; // 缓冲区数组
+  struct bucket bucket[NBUCKET]; // 哈希桶数组
+} bcache;
+```
+NBUF 是缓冲区的数量，NBUCKET 是哈希桶的数量。哈希桶用于减少锁争用。
+我们能在官方的文档中看到建议的哈希桶数量为13，能减少概率
+
+其中NBUCKET需要我们在param.h 定义为13
+
+3.初始化哈希桶
+在 binit() 函数中，初始化每个缓冲区的睡眠锁。
+初始化每个哈希桶的自旋锁和双向链表。
+```bash
+void binit(void) {
+  for (int i = 0; i < NBUF; ++i) {
+    initsleeplock(&bcache.buf[i].lock, "buffer");
+  }
+  for (int i = 0; i < NBUCKET; ++i) {
+    initbucket(&bcache.bucket[i]);
+  }
+}
+```
+initbucket() 函数初始化每个哈希桶的自旋锁，并将链表头指向自己。
+
+4.实现缓冲区查找和获取
+
+在 bget() 函数中，根据块号计算哈希值，将缓冲区映射到哈希桶中。
+首先检查目标块是否已经缓存在对应的哈希桶中；如果存在，增加引用计数并返回。
+如果未缓存，查找未使用的缓冲区，并将其放入哈希桶中。
+
+5.实现缓冲区释放
+
+在 brelse() 函数中，释放缓冲区时，首先锁定对应的哈希桶。
+如果引用计数为 0，将缓冲区移出链表，并清除 used 标志。
+```bash
+void brelse(struct buf *b) {
+  if(!holdingsleep(&b->lock))
+    panic("brelse");
+
+  releasesleep(&b->lock);
+
+  uint v = hash_v(b->blockno);
+  struct bucket* bucket = &bcache.bucket[v];
+  acquire(&bucket->lock);
+
+  b->refcnt--;
+  if (b->refcnt == 0) {
+    b->next->prev = b->prev;
+    b->prev->next = b->next;
+    __atomic_clear(&b->used, __ATOMIC_RELEASE);
+  }
+
+  release(&bucket->lock);
+}
+```
+使用 refcnt 管理缓冲区的引用计数，确保缓冲区被释放后重新进入缓存池。
+
+6.运行bcachetest：运行修改后的bcachetest测试程序，观察锁竞争情况和测试结果。优化后，锁竞争应该大幅减少。
+
+# png28
+
+7.运行usertests：运行usertests测试程序，确保修改不会影响其他部分的正常运行。
+# png29
+
+### 实验中遇到的问题
+
+在进行缓冲区缓存实验时，我遇到了一个困惑的问题：在运行 bcachetest 时，系统频繁出现“panic: bget: no buffers”错误。这个错误让我怀疑系统无法正确分配和管理缓冲区，导致在高并发访问时，缓存中没有可用的缓冲区可供使用。我检查了代码中的 bget 函数，发现问题可能出在缓冲区的哈希桶机制上，特别是在高并发情况下，缓冲区可能无法及时从其他哈希桶中获取，导致缓存无法分配新的缓冲区。
+
+为了解决这个问题，我首先修改了 bget 函数，确保当当前哈希桶没有可用的缓冲区时，系统可以从其他哈希桶中尝试获取可用的缓冲区。这一改动在一定程度上缓解了问题，但系统仍然会偶尔出现相同的错误。经过进一步的调试和分析，我意识到问题可能还在于缓冲区释放的机制上，因此我在 brelse 函数中加入了对引用计数的更严格检查，确保缓冲区在真正空闲时才会被回收。这些改动最终解决了问题，系统不再出现缓冲区耗尽的情况，bcachetest 测试顺利通过。在进行缓冲区缓存实验时，我遇到了一个困惑的问题：在运行 bcachetest 时，系统频繁出现“panic: bget: no buffers”错误。这个错误让我怀疑系统无法正确分配和管理缓冲区，导致在高并发访问时，缓存中没有可用的缓冲区可供使用。我检查了代码中的 bget 函数，发现问题可能出在缓冲区的哈希桶机制上，特别是在高并发情况下，缓冲区可能无法及时从其他哈希桶中获取，导致缓存无法分配新的缓冲区。
+
+### 实验心得
+
+在完成缓冲区缓存实验的过程中，我对系统的内存管理和并发处理有了更深入的理解。这个实验让我意识到，在高并发环境中，如何有效地管理和分配资源是非常重要的，特别是在处理像缓冲区这样的共享资源时，设计合理的锁机制和缓存策略至关重要。
+
+实验中遇到的问题和挑战也帮助我认识到调试和优化代码的重要性。通过多次分析和修改，我最终解决了系统在高并发访问下出现的缓存耗尽问题。这不仅让我学到了具体的编程技巧，也让我深刻理解了设计模式和数据结构在实际应用中的重要性。总的来说，这次实验不仅增强了我对操作系统内核的理解，也提高了我处理复杂问题的能力。
+
+
+# Lab: file system
+在本实验中，您将向 xv6 添加大文件和符号链接 文件系统。
+
+开始实验前，请更改到fs分支
+```bash
+  $ git fetch
+  $ git checkout fs
+  $ make clean
+```
+
+# Large files
+
+### 实验目的
+本实验旨在修改 xv6 文件系统，以支持更大的文件大小。具体来说，将实现双重间接块（double-indirect block），使得文件可以包含最多 65,803 个块。这一扩展将增加 xv6 文件系统的最大文件大小，从 268 个块（268 KB）扩展到 65,803 个块（约 65 MB）。
+
+### 实验步骤
+1.修改 bmap 函数
+bmap 函数的作用是将文件的逻辑块号映射到磁盘上的物理块号。我们需要修改 bmap 函数以支持双重间接块的处理。
+```bash
+if (bn < NDIRECT) {
+    if ((addr = ip->addrs[bn]) == 0)
+        ip->addrs[bn] = addr = balloc(ip->dev);
+    return addr;
+}
+```
+如果逻辑块号 bn 小于直接块的数量 NDIRECT，则直接访问 ip->addrs[bn] 获取相应的物理块号。如果该物理块号为空，则分配一个新的块并存储在 ip->addrs[bn] 中。
+
+处理单间接块：
+```bash
+bn -= NDIRECT;
+if (bn < NINDIRECT) {
+    if ((addr = ip->addrs[NDIRECT]) == 0)
+        ip->addrs[NDIRECT] = addr = balloc(ip->dev);
+    bp = bread(ip->dev, addr);
+    a = (uint *)bp->data;
+    if ((addr = a[bn]) == 0) {
+        a[bn] = addr = balloc(ip->dev);
+        log_write(bp);
+    }
+    brelse(bp);
+    return addr;
+}
+```
+首先将 bn 减去 NDIRECT，因为前 NDIRECT 个块是直接块。接下来，如果逻辑块号在单间接块的范围内，则访问单间接块的索引块，读取其中的物理块号。如果该块未分配，则分配一个新块，并在索引中更新。最后，返回该物理块号。
+
+处理双重间接块：
+```bash
+bn -= NINDIRECT;
+if (bn < NDOUBLE) {
+    if ((addr = ip->addrs[NDIRECT+1]) == 0)
+        ip->addrs[NDIRECT+1] = addr = balloc(ip->dev);
+
+    bp = bread(ip->dev, addr);
+    a = (uint *)bp->data;
+    uint double_bn = bn / NINDIRECT;
+    uint single_bn = bn % NINDIRECT;
+
+    if ((addr = a[double_bn]) == 0) {
+        a[double_bn] = addr = balloc(ip->dev);
+        log_write(bp);
+    }
+    brelse(bp);
+
+    bp2 = bread(ip->dev, addr);
+    a = (uint *)bp2->data;
+    if ((addr = a[single_bn]) == 0) {
+        a[single_bn] = addr = balloc(ip->dev);
+        log_write(bp2);
+    }
+    brelse(bp2);
+    return addr;
+}
+```
+首先将 bn 减去 NINDIRECT，然后检查逻辑块号是否在双重间接块的范围内。如果是，则从双重间接块开始，通过两级索引定位到实际的数据块。在每一级索引中，检查块是否已分配，未分配则进行分配并更新索引。
+
+2.修改 itrunc 函数
+我们在修改bmap后，也要对应的修改itrunc，才能实现功能的完善
+itrunc 函数的作用是在文件被删除或截断时释放与该文件相关的所有块。
+
+释放直接块：
+```bash
+for (i = 0; i < NDIRECT; i++) {
+    if (ip->addrs[i]) {
+        bfree(ip->dev, ip->addrs[i]);
+        ip->addrs[i] = 0;
+    }
+}
+```
+依次检查每个直接块号，如果它已分配，则释放相应的物理块并将块号置为0。
+
+释放单间接块：
+```bash
+if (ip->addrs[NDIRECT]) {
+    bp = bread(ip->dev, ip->addrs[NDIRECT]);
+    a = (uint *)bp->data;
+    for (j = 0; j < NINDIRECT; j++) {
+        if (a[j])
+            bfree(ip->dev, a[j]);
+    }
+    brelse(bp);
+    bfree(ip->dev, ip->addrs[NDIRECT]);
+    ip->addrs[NDIRECT] = 0;
+}
+```
+读取单间接块的索引块，释放其中指向的所有物理块，然后释放索引块自身。
+
+释放双重间接块：
+```bash
+if (ip->addrs[NDIRECT+1]) {
+    bp = bread(ip->dev, ip->addrs[NDIRECT+1]);
+    a = (uint *)bp->data;
+    for (j = 0; j < NINDIRECT; j++) {
+        if (a[j]) {
+            bp2 = bread(ip->dev, a[j]);
+            a2 = (uint *)bp2->data;
+            for (k = 0; k < NINDIRECT; k++) {
+                if (a2[k])
+                    bfree(ip->dev, a2[k]);
+            }
+            brelse(bp2);
+            bfree(ip->dev, a[j]);
+        }
+    }
+    brelse(bp);
+    bfree(ip->dev, ip->addrs[NDIRECT+1]);
+    ip->addrs[NDIRECT+1] = 0;
+}
+```
+读取双重间接块的索引块，遍历其中的每个单间接块，依次释放它们指向的所有物理块，并最终释放双重间接块自身。
+
+3.在 kernel/file.c 文件中，找到 filewrite() 函数的实现。确保在写文件时正确调用了 bmap() 函数。
+
+4.运行 bigfile 测试，确保它可以成功创建文件，并报告正确的文件大小。这个测试可能会花费一些时间。
+# png31
+5.运行 usertests 测试套件，确保所有的测试都通过。这可以验证你的修改是否没有引入错误，并且 xv6 正常运行。
+# png30
+
+### 实验中遇到的问题
+
+在实验的过程中，我遇到了一个摸不清的问题。当我修改完 bmap 函数以支持双重间接块后，运行测试时，系统在执行 test manywrites 时卡住了。经过仔细检查，我发现问题出在 bmap 函数的逻辑上，特别是在处理双重间接块的部分。由于双重间接块的逻辑比较复杂，我不小心在索引块的分配和释放时遗漏了一些关键步骤，导致系统在执行写操作时进入了死循环。
+
+为了解决这个问题，我首先仔细梳理了 bmap 函数的逻辑，逐行检查代码的执行路径。我发现，在为双重间接块分配新的物理块时，可能会因为未正确更新索引而导致死锁。为此，我在每次分配新块后，确保立即调用 log_write 函数将索引块写入日志，并在适当时机释放相关的缓冲区。经过这些修正，我再次编译并运行测试，发现问题得到了解决，所有测试均通过。这次问题的解决不仅让我更深入理解了文件系统的块管理机制，也让我意识到在处理复杂数据结构时必须非常谨慎。
+
+### 实验心得
+
+在这次实验中，我深入探讨并修改了 xv6 文件系统的块管理机制，以支持更大文件的存储。通过增加双重间接块，我成功扩展了文件系统的容量，突破了原有的 268 块限制。在这个过程中，我不仅学习了文件系统的核心结构，还锻炼了调试复杂代码的能力。
+
+最具挑战性的一部分是理解并正确实现双重间接块的逻辑。在反复调试和测试中，我逐渐掌握了 xv6 的 inode 结构和块映射机制。特别是在解决死锁和逻辑错误时，我学会了如何分析问题根源并进行有效修正。这次实验让我认识到，面对复杂的系统架构时，细心和耐心是不可或缺的。此外，这次实验也让我对文件系统的内部工作原理有了更深刻的理解，为后续的学习和研究打下了坚实的基础。
+
+# Symbolic links
+
+### 实验目的
+本实验的目的是在 xv6 操作系统中添加符号链接的支持。符号链接是一种文件类型，它通过路径名引用另一个文件或目录。实现符号链接有助于理解文件系统路径解析的工作原理，并加深对 xv6 操作系统内部机制的理解。通过完成此实验，您将学习如何扩展文件系统功能，并处理文件系统中的路径解析和递归查找等问题。
+
+### 实验步骤
+1.我们需要为 symlink 系统调用分配一个系统调用号，并在相应的文件中声明。系统调用号在 kernel/syscall.h 中定义。
+
+在 kernel/syscall.h 中添加以下代码，为 symlink 分配系统调用号：
+
+```bash
+#define SYS_symlink 22  // 实验 9.2
+```
+在 kernel/syscall.c 文件中，我们需要将 sys_symlink 函数加入到系统调用表中,
+添加 sys_symlink 函数的声明，以便系统能够识别新的系统调用：
+```bash
+static uint64 (*syscalls[])(void) = {
+    ...
+    [SYS_symlink] sys_symlink,
+};
+
+extern uint64 SYS_symlink(void);
+```
+
+2.在 user/usys.pl 中添加 symlink 的入口声明：
+```bash
+entry("symlink");
+```
+
+在 user/user.h 文件中添加以下声明，以便用户程序可以调用该系统调用：
+```bash
+int symlink(char*, char*);
+```
+通过这些步骤，我们已经成功地将 symlink 系统调用集成到 xv6 中。
+
+3.定义文件类型
+为了区分普通文件和符号链接，我们在 kernel/stat.h 文件中添加一个新的文件类型 T_SYMLINK：
+```bash
+#define T_SYMLINK 4   // 表示符号链接的文件类型
+```
+这个定义允许内核识别和处理符号链接，并将其与常规文件区分开来。
+
+4.添加打开标志
+在 kernel/fcntl.h 文件中添加新的打开标志 O_NOFOLLOW，这个标志用于指示 open 系统调用是否应当跟随符号链接：
+
+```bash
+#define O_NOFOLLOW 0x004    // 防止跟随符号链接
+```
+O_NOFOLLOW 标志可以与 open 系统调用一起使用。当指定该标志时，open 应该打开符号链接本身，而不是链接指向的目标文件。
+
+5.实现 sys_symlink 系统调用
+在 kernel/sysfile.c 文件中实现 sys_symlink 系统调用，该函数负责创建符号链接。符号链接的实现涉及创建一个特殊类型的 inode，并将目标路径写入 inode 的数据块中。
+```bash
+uint64 sys_symlink(void) {
+    char target[MAXPATH], path[MAXPATH];
+    struct inode *ip;
+    int n;
+
+    if ((n = argstr(0, target, MAXPATH)) < 0 || argstr(1, path, MAXPATH) < 0) {
+        return -1;
+    }
+
+    begin_op();
+    // 创建符号链接的 inode
+    if((ip = create(path, T_SYMLINK, 0, 0)) == 0) {
+        end_op();
+        return -1;
+    }
+    // 将目标路径写入节点
+    if(writei(ip, 0, (uint64)target, 0, n) != n) {
+        iunlockput(ip);
+        end_op();
+        return -1;
+    }
+
+    iunlockput(ip);
+    end_op();
+    return 0;
+}
+```
+在这个函数中，首先通过 create 函数创建一个 T_SYMLINK 类型的 inode，然后将目标路径写入 inode 的数据块中。需要特别注意的是，在进行文件系统操作时，确保正确的加锁和解锁，以防止并发访问带来的问题。
+
+6.修改 sys_open 函数以处理符号链接
+在 kernel/sysfile.c 中修改 sys_open 函数，使其能够正确处理符号链接。如果文件路径指向符号链接，并且未指定 O_NOFOLLOW 标志，那么 open 应该解析符号链接并打开目标文件。
+
+在这个实现中，我们在 sys_open 函数中添加了对符号链接的处理逻辑。当 open 系统调用遇到符号链接时，如果没有指定 O_NOFOLLOW 标志，它会递归解析符号链接，直到找到目标文件或达到指定的递归深度。
+
+7.修改 namex 函数以处理符号链接
+在 kernel/namei.c 文件中修改 namex 函数，使其在路径查找过程中能够正确处理符号链接，并递归解析实际文件。以下是修改后的 namex 函数：
+```bash
+static struct inode* namex(char *path, int nameiparent, char *name) {
+    struct inode *ip, *next;
+    int depth = 0; // 用于限制递归深度，避免循环符号链接
+    char symlink_path[MAXPATH];
+
+    if(*path == '/')
+        ip = iget(ROOTDEV, ROOTINO);
+    else
+        ip = idup(myproc()->cwd);
+
+    while((path = skipelem(path, name)) != 0){
+        ilock(ip);
+
+        // 处理符号链接
+        while (ip->type == T_SYMLINK && depth < 10) {
+            if (readi(ip, 0, (uint64)symlink_path, 0, ip->size) != ip->size) {
+                iunlockput(ip);
+                return 0;
+            }
+            symlink_path[ip->size] = '\0';
+            iunlockput(ip);
+
+            ip = namei(symlink_path);
+            if (ip == 0) {
+                return 0;
+            }
+
+            ilock(ip);
+            depth++;
+        }
+
+        if(ip->type != T_DIR){
+            iunlockput(ip);
+            return 0;
+        }
+
+        if(nameiparent && *path == '\0'){
+            iunlock(ip);
+            return ip;
+        }
+
+        if((next = dirlookup(ip, name, 0)) == 0){
+            iunlockput(ip);
+            return 0;
+        }
+
+        iunlockput(ip);
+        ip = next;
+    }
+
+    if(nameiparent){
+        iput(ip);
+        return 0;
+    }
+    return ip;
+}
+```
+在 namex 函数中，我们通过递归的方式处理符号链接，并且增加了对循环符号链接的检测。如果检测到循环或递归深度超过设定值（如 10 次），函数将返回错误，防止程序陷入无限循环。
+
+8.运行 symlinktest 确认所有测试都通过，验证符号链接功能的正确性：
+```bash
+./grade-lab-fs symlinktest
+```
+# png32
+
+
+### 实验中遇到的问题
+
+在实验的过程中，我遇到了一个问题，就是在实现 sys_open 系统调用时，程序在处理符号链接时会出现循环引用，导致栈溢出并触发系统崩溃。具体来说，当我创建了两个符号链接相互引用对方时，系统在解析路径时陷入了无限递归。起初，我并未考虑到符号链接可能会形成循环引用，导致系统在遇到这种情况时无法正常处理。这个问题让我意识到，必须在解析符号链接的过程中加入循环检测机制，以避免这种递归陷阱。
+
+为了解决这个问题，我在 sys_open 和 namex 函数中增加了对符号链接解析深度的限制。在每次递归解析符号链接时，我增加一个计数器，并且将这个计数器的最大值限制在 10 以内。如果在解析过程中符号链接的深度超过了这个阈值，系统将返回一个错误，并停止进一步解析。通过这种方法，我成功地解决了符号链接循环引用的问题，确保了系统的稳定性和正确性。经过修改和测试，symlinktest 测试通过了所有的验证。
+
+### 实验心得
+
+在这次实验中，我深入理解了符号链接的实现原理以及文件系统路径解析的复杂性。通过实现 sys_symlink 系统调用，我不仅增强了对 xv6 文件系统的理解，还进一步熟悉了操作系统在处理文件和目录路径时的底层机制。
+
+最大的收获在于，我意识到处理符号链接时，需要特别注意可能的循环引用问题。通过引入深度限制和递归解析策略，我成功避免了符号链接可能引发的无限递归问题。在解决这些问题的过程中，我不仅提升了代码编写的严谨性，还学会了如何在代码设计中考虑边界情况和潜在的陷阱。这次实验给了我一次难得的机会，让我更加全面地理解了操作系统的设计原则和实现细节，同时也增强了我在面对复杂系统时的调试能力和解决问题的信心。
+
+
+
+
+
 
