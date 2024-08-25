@@ -2296,7 +2296,219 @@ static struct inode* namex(char *path, int nameiparent, char *name) {
 最大的收获在于，我意识到处理符号链接时，需要特别注意可能的循环引用问题。通过引入深度限制和递归解析策略，我成功避免了符号链接可能引发的无限递归问题。在解决这些问题的过程中，我不仅提升了代码编写的严谨性，还学会了如何在代码设计中考虑边界情况和潜在的陷阱。这次实验给了我一次难得的机会，让我更加全面地理解了操作系统的设计原则和实现细节，同时也增强了我在面对复杂系统时的调试能力和解决问题的信心。
 
 
+# Lab: mmap
+mmap 和 munmap 系统调用允许 UNIX 程序 对他们的地址空间进行详细控制。他们可以使用 在进程之间共享内存，将文件映射到进程地址 空格，以及作为用户级页面错误方案的一部分，例如 讲座中讨论了垃圾收集算法。 在本实验中，您将向 xv6 添加 mmap 和 munmap，重点介绍内存映射文件。
+
+实验开始前请切换到mmap分支
+```bash
+  $ git fetch
+  $ git checkout mmap
+  $ make clean
+```
+
+手册页 （run ） 显示了 mmap 的以下声明：man 2 mmap
+```bash
+void *mmap(void *addr, size_t length, int prot, int flags,
+           int fd, off_t offset);
+```
+mmap 可以通过多种方式调用 但此实验室只需要 与内存映射文件相关的功能子集。 您可以假设 addr 始终为零，这意味着 kernel 应该决定映射文件的虚拟地址。mmap 返回该地址，或者0xffffffffffffffff 它失败了。length 是要映射的字节数;可能不是 与文件的长度相同。prot 指示是否应映射内存 可读、可写和/或可执行;你可以假设 该 prot 是 PROT_READ 或 PROT_WRITE 或两者兼而有之。flags 将为 MAP_SHARED、 这意味着对映射内存的修改应该 写回文件，或者MAP_PRIVATE 这意味着他们不应该。您不必实施任何 Flags 中的其他位。fd 是要映射的文件的打开文件描述符。 您可以假设 offset 为零（这是起点 在要映射的文件中）。
+
+如果映射同一 MAP_SHARED 文件的进程不共享物理页，那也没关系。
+
+munmap（addr， length） 应该删除 指示的地址范围。如果进程修改了内存和 将其映射MAP_SHARED，则修改应首先为 写入文件。munmap 调用可能只涵盖 部分，但您可以假设它将 在开头、结尾或整个片段（但不是 区域中间的孔）。
+
+### 实验目的
+本次实验旨在向 xv6 操作系统添加 mmap 和 munmap 系统调用，实现对进程地址空间的详细控制。通过实现这两个系统调用，我们可以实现内存映射文件的功能，包括共享内存、将文件映射到进程地址空间等。这有助于理解虚拟内存管理和页面错误处理的机制。
+
+### 实验步骤
+1.添加 mmap 和 munmap 系统调用号和声明。
+
+修改 kernel/syscall.h：
+```bash
+#define SYS_mmap   22   
+#define SYS_munmap 23  
+```
+
+修改 kernel/syscall.c：
+```bash
+extern uint64 sys_mmap(void);   
+extern uint64 sys_munmap(void); 
+
+static uint64 (*syscalls[])(void) = {
+    ...
+    [SYS_mmap]    sys_mmap,   
+    [SYS_munmap]  sys_munmap, 
+};
+```
+修改 user/usys.pl：
+```bash
+entry("mmap");      
+entry("munmap");    
+```
+
+修改 user/user.h：
+```bash
+void *mmap(void *, int, int, int, int, int);
+int munmap(void *, int);
+```
+上述步骤是为了在系统调用机制中为 mmap 和 munmap 系统调用分配编号、声明函数，并确保这些系统调用可以在用户空间调用时正确映射到内核中的相应函数实现。
+
+2.定义表示内存映射区域的结构体 vm_area，并在进程结构中添加 VMA 数组。
+
+vm_area 结构体用于表示通过 mmap 系统调用映射到进程地址空间的文件区域。定义 vma 数组是为了记录每个进程的所有内存映射区域，并在需要时对其进行管理，例如处理页面错误、取消映射等操作。
+
+```bash
+#define NVMA 16  // 定义进程最大支持的 VMA 数量
+
+struct vm_area {
+    uint64 addr;    // mmap address
+    int len;        // mmap memory length
+    int prot;       // 权限 (读/写)
+    int flags;      // mmap 标志位 (MAP_SHARED 或 MAP_PRIVATE)
+    int offset;     // 文件偏移
+    struct file* f; // 映射的文件指针
+};
+
+struct proc {
+    ...
+    struct vm_area vma[NVMA];  // VMA 数组，用于存储进程的虚拟内存区域
+};
+```
+
+3.实现 mmap 系统调用所需的权限和标志位。
+
+在 kernel/fcntl.h 中定义 MAP_SHARED 和 MAP_PRIVATE 标志位：
+
+```bash
+#define MAP_SHARED  0x01  // 共享映射
+#define MAP_PRIVATE 0x02  // 私有映射
+```
+
+MAP_SHARED 和 MAP_PRIVATE 标志位分别用于定义映射区域的共享和私有性质。这些标志位将在 mmap 系统调用实现中用于设置映射区域的行为。
+
+4.实现 mmap 系统调用，处理内存映射的相关操作。
+
+在 kernel/sysfile.c 中实现 sys_mmap() 函数：
+
+```bash
+uint64 sys_mmap(void) {
+    struct file *f;
+    int len, prot, flags, fd, offset;
+    uint64 addr;
+
+    if (argint(1, &len) < 0 || argint(2, &prot) < 0 || argint(3, &flags) < 0 ||
+        argfd(4, &fd, &f) < 0 || argint(5, &offset) < 0)
+        return -1;
+
+    // 检查标志位合法性
+    if (flags != MAP_SHARED && flags != MAP_PRIVATE)
+        return -1;
+
+    // 分配 VMA 结构并初始化
+    struct proc *p = myproc();
+    for (int i = 0; i < NVMA; i++) {
+        if (!p->vma[i].f) {
+            addr = MMAPMINADDR;
+            p->vma[i].addr = addr;
+            p->vma[i].len = len;
+            p->vma[i].prot = prot;
+            p->vma[i].flags = flags;
+            p->vma[i].offset = offset;
+            p->vma[i].f = filedup(f);  // 增加文件引用计数
+            return addr;
+        }
+    }
+
+    return -1;  // 没有可用的 VMA
+}
+```
+sys_mmap 函数实现了内存映射的核心功能，包括参数检查、分配 VMA 结构、记录映射区域信息，并返回映射的起始地址。使用 filedup 增加文件引用计数，确保文件不会在映射期间被关闭。
+
+5.实现 munmap 系统调用，处理内存取消映射的相关操作。
+
+在 kernel/sysfile.c 中实现 sys_munmap() 函数：
+```bash
+uint64 sys_munmap(void) {
+    uint64 addr;
+    int length;
+
+    if (argaddr(0, &addr) < 0 || argint(1, &length) < 0)
+        return -1;
+
+    struct proc *p = myproc();
+    for (int i = 0; i < NVMA; i++) {
+        if (p->vma[i].addr == addr && p->vma[i].len == length) {
+            uvmunmap(p->pagetable, addr, length/PGSIZE, 1);
+            fileclose(p->vma[i].f);
+            p->vma[i].f = 0;  // 释放 VMA
+            return 0;
+        }
+    }
+
+    return -1;  // 未找到匹配的 VMA
+}
+```
+sys_munmap 函数用于处理内存区域的取消映射。通过查找与给定地址和长度匹配的 VMA，取消映射相应的内存区域，并关闭文件句柄，释放 VMA 结构。
+
+6. 修改 exit 和 fork 系统调用，以支持 VMA 处理。
+
+7. 在发生页面错误时，正确处理 mmap 映射的内存。
+
+修改 kernel/trap.c 中的 usertrap() 函数：
+
+```bash
+void usertrap(void) {
+    ...
+    uint64 va = r_stval();
+    struct proc *p = myproc();
+
+    for (int i = 0; i < NVMA; i++) {
+        struct vm_area *v = &p->vma[i];
+        if (va >= v->addr && va < v->addr + v->len) {
+            char *mem = kalloc();
+            memset(mem, 0, PGSIZE);
+            if (readi(v->f->ip, 0, (uint64)mem, v->offset + (va - v->addr), PGSIZE) < 0) {
+                kfree(mem);
+                break;
+            }
+            if (mappages(p->pagetable, va, PGSIZE, (uint64)mem, PTE_W | PTE_R | PTE_U) < 0) {
+                kfree(mem);
+                break;
+            }
+            return;
+        }
+    }
+    ...
+}
+```
+在页面错误处理函数中，检查触发错误的地址是否属于 mmap 映射的区域。如果是，则分配一个新的物理页面，并将相应文件内容加载到页面中，最后将页面映射到用户地址空间中。
+
+8.设置脏页标志位
+在 kernel/riscv.h 中定义脏页标志位 PTE_D，表示页面已被修改。
+```bash
+#define PTE_D (1L << 7) 
+```
+
+在 kernel/vm.c 中实现 uvmgetdirty() 和 uvmsetdirtywrite() 两个函数，用于读取和设置脏页标志位。
+
+9.编译调试
+mmaptest 测试：
+# 33
+make grade
+# 34
 
 
+### 实验中遇到的问题
+在进行 mmap 和 munmap 实验的过程中，我遇到了几个问题，其中一个较大的挑战是实现页面错误处理中的内存映射问题。在最初的实现中，当发生页面错误时，我直接使用 readi 函数从文件中读取数据并映射到用户空间，结果系统经常崩溃，报出非法内存访问的错误。经过调试，发现问题在于页面错误处理中，文件指针 file 和文件 inode 之间的关系没有处理好。readi 函数期望的是一个 inode 指针，而不是文件指针，这导致了参数传递中的不匹配，引发了系统崩溃。为了解决这个问题，我在处理页面错误时，先从文件指针中提取 inode 指针，再调用 readi 函数读取文件内容。这样，问题解决了，页面错误处理也正常了，mmap 和 munmap 功能顺利实现。
 
+在实现 exit 和 fork 函数的修改时，程序在 fork 之后有时会出现文件引用计数错误，导致文件关闭时出现资源泄露或者进程退出时系统崩溃。分析后发现，在 fork 函数中，复制父进程的虚拟内存区域（VMA）时，没有正确处理文件的引用计数，导致多个进程共享同一个文件时，引用计数不一致。在修改过程中，我在复制 VMA 的同时，增加了对文件指针的引用计数，并确保在进程退出时正确释放资源，解决了资源泄露的问题。
 
+### 实验心得
+
+在这个实验中，我深入研究并实现了 mmap 和 munmap 系统调用，这个过程对我来说充满了挑战，同时也带来了很多学习和成长的机会。通过这个实验，我不仅在理论上理解了内存管理的原理，还在实践中体验到了如何将这些原理应用于操作系统的实际开发中。
+
+实验的开始阶段，我主要集中在了解 mmap 和 munmap 的基本概念以及它们在操作系统中的重要性。mmap 允许程序将文件映射到进程的地址空间，从而实现更高效的文件访问和内存共享，而 munmap 则负责取消这种映射。在实现 mmap 时，我特别关注了懒加载内存的方式，通过在页面错误时动态分配内存，避免了预先分配所有内存所带来的资源浪费。这种设计在处理大文件时尤其重要，它不仅提高了内存使用效率，还保证了系统的稳定性。
+
+在实际编码过程中，我遇到了许多意想不到的问题。例如，在处理页面错误时，我发现需要仔细管理页表和内存映射，否则很容易导致系统崩溃或者内存泄漏。在调试时，我多次遇到由于未正确处理内存页标志位而导致的错误。这促使我深入研究了 RISC-V 的页面管理机制，并进一步理解了如何通过标志位控制内存页的读写权限。最终，通过对代码的不断调整和优化，我成功实现了 mmap 和 munmap，并保证它们能够正确处理各种边界情况。
+
+除了技术上的挑战，这个实验还让我体会到了良好的代码结构和清晰的逻辑对于系统开发的重要性。在实现 mmap 和 munmap 的过程中，我学会了如何合理地设计数据结构，如何有效地管理资源，以及如何处理进程之间的内存共享。这些经验不仅增强了我对操作系统内核的理解，也提升了我在系统编程中的整体能力
